@@ -1,15 +1,20 @@
 {
   "name": "@choosek/kinetics",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Library for static analysis of transactions across the Move ecosystem.",
   "license": "MIT",
   "homepage": "https://github.com/choosek/kinetics-ts",
   "type": "module",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "browser": "./dist/index.global.js",
+  "unpkg": "./dist/index.global.js",
+  "jsdelivr": "./dist/index.global.js",
+  "source": "./src/lib.ts",
   "exports": {
     "./package.json": "./package.json",
     ".": {
+      "source": "./src/lib.ts",
       "import": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"

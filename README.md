@@ -14,6 +14,7 @@ This library reconstructs the dataflow structure of a [Programmable Transaction 
 
 The package can be installed using [pnpm](https://pnpm.io/):
 ```shell
+corepack enable
 pnpm install
 ```
 The library can be imported in the usual way:
