@@ -634,7 +634,10 @@ function _normalizeCommand(raw: unknown, index: number): Command {
     }
     case CommandKind.MakeMoveVec: {
       const elementsRaw =
-        _get(body, "elements") ?? _indexed(body, 1) ?? _get(body, "objects") ?? [];
+        _get(body, "elements") ??
+        _indexed(body, 1) ??
+        _get(body, "objects") ??
+        [];
       const elements = Array.isArray(elementsRaw) ? compact(elementsRaw) : [];
       return {
         ...base,
@@ -669,10 +672,9 @@ function _normalizeCommand(raw: unknown, index: number): Command {
     default:
       return {
         ...base,
-        kind:
-          (Object.values(CommandKind) as string[]).includes(key)
-            ? (key as CommandKind)
-            : CommandKind.Unknown,
+        kind: (Object.values(CommandKind) as string[]).includes(key)
+          ? (key as CommandKind)
+          : CommandKind.Unknown,
       };
   }
 }
@@ -740,7 +742,8 @@ function buildGraph(commands: Command[], inputs: Input[]): Graph {
       kind: "input",
       index: i,
       label: `Input(${i})`,
-      valueType: input?.type ?? input?.valueType ?? (isObject ? "object" : "pure"),
+      valueType:
+        input?.type ?? input?.valueType ?? (isObject ? "object" : "pure"),
       value: input?.value ?? input?.objectId ?? null,
     });
   });
@@ -884,7 +887,9 @@ function criticalPath(commands: Command[]): CriticalPath {
 function taintAnalysis(commands: Command[], inputs: Input[]): Taint {
   const taint = new Map<string, Set<number | string>>();
 
-  inputs.forEach((_input, i) => taint.set(`in:${i}`, new Set([i])));
+  inputs.forEach((_input, i) => {
+    taint.set(`in:${i}`, new Set([i]));
+  });
   taint.set("gas", new Set<number | string>(["gas"]));
 
   for (const command of commands) {
@@ -980,7 +985,11 @@ function resourceAccounting(
       const isConsumed =
         consumed.has(`cmd:${command.index}`) ||
         consumed.has(`cmd:${command.index}#0`);
-      results.push({ producer: command.index, sub: null, consumed: isConsumed });
+      results.push({
+        producer: command.index,
+        sub: null,
+        consumed: isConsumed,
+      });
       if (!isConsumed && _producesResource(command)) {
         dangling.push({
           command: command.index,
@@ -1249,8 +1258,8 @@ export function mistToSui(mist: number | bigint): string {
 export {
   buildGraph,
   criticalPath,
-  taintAnalysis,
-  resourceAccounting,
   extractGas,
   extractObjectChanges,
+  resourceAccounting,
+  taintAnalysis,
 };
