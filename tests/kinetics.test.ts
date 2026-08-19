@@ -235,9 +235,7 @@ describe("dataflow graph construction", () => {
   test("every command edge target corresponds to a command node", () => {
     const analysis = kinetics.analyzePtb(composedBlock());
     const commandIds = new Set(
-      analysis.graph.nodes
-        .filter((n) => n.kind === "command")
-        .map((n) => n.id),
+      analysis.graph.nodes.filter((n) => n.kind === "command").map((n) => n.id),
     );
     for (const edge of analysis.graph.edges) {
       expect(commandIds.has(edge.to)).toBe(true);
@@ -396,7 +394,10 @@ describe("linear-resource accounting", () => {
       transactions: [
         // Two split outputs; only the first is transferred.
         {
-          SplitCoins: { coin: "GasCoin", amounts: [{ Input: 0 }, { Input: 1 }] },
+          SplitCoins: {
+            coin: "GasCoin",
+            amounts: [{ Input: 0 }, { Input: 1 }],
+          },
         },
         {
           TransferObjects: {
@@ -524,7 +525,14 @@ describe("normalization of source encodings", () => {
     const block: kinetics.ProgrammableTransactionBlock = {
       inputs: [],
       commands: [
-        { MoveCall: { package: "0x1", module: "m", function: "f", arguments: [] } },
+        {
+          MoveCall: {
+            package: "0x1",
+            module: "m",
+            function: "f",
+            arguments: [],
+          },
+        },
       ],
     };
     const analysis = kinetics.analyzePtb(block);
@@ -535,8 +543,22 @@ describe("normalization of source encodings", () => {
     const block: kinetics.ProgrammableTransactionBlock = {
       inputs: [],
       transactions: [
-        { MoveCall: { package: "0x1", module: "m", function: "a", arguments: [] } },
-        { MoveCall: { package: "0x1", module: "m", function: "b", arguments: [0] } },
+        {
+          MoveCall: {
+            package: "0x1",
+            module: "m",
+            function: "a",
+            arguments: [],
+          },
+        },
+        {
+          MoveCall: {
+            package: "0x1",
+            module: "m",
+            function: "b",
+            arguments: [0],
+          },
+        },
       ],
     };
     const analysis = kinetics.analyzePtb(block);
@@ -624,7 +646,9 @@ describe("errors thrown by the analyzer", () => {
   test("analyzePtb throws a TypeError when the block is not a simple object", () => {
     for (const value of [null, undefined, 42, "block", [], true]) {
       try {
-        kinetics.analyzePtb(value as unknown as kinetics.ProgrammableTransactionBlock);
+        kinetics.analyzePtb(
+          value as unknown as kinetics.ProgrammableTransactionBlock,
+        );
         expectThrow();
       } catch (e) {
         expect(e).toBeInstanceOf(TypeError);
@@ -660,12 +684,7 @@ describe("individual analyses invoked directly", () => {
 
   test("taintAnalysis and resourceAccounting agree with analyzePtb", () => {
     const analysis = kinetics.analyzePtb(composedBlock(), composedEffects());
-    const taint = kinetics.taintAnalysis(analysis.commands, [
-      {},
-      {},
-      {},
-      {},
-    ]);
+    const taint = kinetics.taintAnalysis(analysis.commands, [{}, {}, {}, {}]);
     expect(taint.sinks.length).toBe(analysis.taint.sinks.length);
     const resources = kinetics.resourceAccounting(
       analysis.commands,
