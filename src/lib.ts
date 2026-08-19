@@ -1263,3 +1263,9 @@ export {
   resourceAccounting,
   taintAnalysis,
 };
+
+// The Move VM (Aptos/Movement) transaction analyzer is re-exported here so that
+// the library's single public entry point covers all supported chains. The Sui
+// PTB analyses above and the account-model analyses below share no names, so
+// the two surfaces compose without collision.
+export * from "./movevm";
