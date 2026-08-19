@@ -1,5 +1,4 @@
 name: CI
-
 on:
   push:
     branches:
@@ -8,11 +7,9 @@ on:
     branches:
       - main
   workflow_dispatch:
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   check:
     name: Lint and check types
@@ -31,7 +28,6 @@ jobs:
           pnpm biome ci
           pnpm typecheck
           pnpm attw
-
   test:
     name: Test and report coverage
     needs: check
