@@ -1,5 +1,5 @@
 /**
- * Functional and structural unit tests for the PTB static analyzer.
+ * Functional and structural unit tests for the Sui PTB static analyzer.
  * Test suite containing functional unit tests for the exported analyses, as
  * well as unit tests confirming structural relationships (such as the
  * consistency of the dataflow graph with the critical-path decomposition and
