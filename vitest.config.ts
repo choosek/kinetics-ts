@@ -9,7 +9,7 @@ export default defineConfig((_config) => ({
       enabled: true,
       reporter: ["text", "json-summary", "json", "lcov"],
       reportOnFailure: true,
-      exclude: ["./*.config.ts", "./bin/publish.ts"],
+      exclude: ["./*.config.ts", "./bin/version.ts"],
     },
   },
 }));

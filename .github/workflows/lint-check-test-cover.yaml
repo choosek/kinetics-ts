@@ -1,4 +1,4 @@
-name: check-test
+name: lint-check-test-cover
 on:
   push:
     branches:
@@ -11,7 +11,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  check:
+  lint-check:
     name: Lint and check types
     runs-on: ubuntu-latest
     steps:
@@ -28,9 +28,9 @@ jobs:
           pnpm biome ci
           pnpm typecheck
           pnpm attw
-  test:
+  test-cover:
     name: Test and report coverage
-    needs: check
+    needs: lint-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
