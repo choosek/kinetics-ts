@@ -27,6 +27,13 @@
  * performed.
  */
 
+import {
+  getField as _get,
+  isSimpleObject as _isObject,
+  toNumber as _toNumber,
+  toStringOrNull as _toStringOrNull,
+} from "./common";
+
 /**
  * Enumeration of the payload categories an Aptos/Movement user transaction can
  * carry. Entry-function payloads name a single `module::function` to invoke;
@@ -248,39 +255,6 @@ const _DEFAULT_DECIMALS = 8;
 const _MAX_ECHOED_ARGS = 16;
 
 /**
- * Type guard narrowing an unknown value to a plain (non-array, non-null)
- * object. Used to defend every field access against malformed input.
- */
-function _isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Safe property read that never throws on a non-object. */
-function _get(value: unknown, key: string): unknown {
-  return _isObject(value) ? value[key] : undefined;
-}
-
-/** Coerce an unknown (often a numeric string from JSON) to a finite number. */
-function _toNumber(value: unknown): number {
-  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
-  if (typeof value === "bigint") return Number(value);
-  if (typeof value === "string" && value.trim() !== "") {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-  }
-  return 0;
-}
-
-/** Coerce an unknown to a trimmed string, or `null` when not string-like. */
-function _toStringOrNull(value: unknown): string | null {
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "bigint") {
-    return String(value);
-  }
-  return null;
-}
-
-/**
  * Parse a fully-qualified function identifier of the form
  * `0xADDR::module::name` into its parts. Returns `null` when the string is
  * absent or does not contain the two required separators.
@@ -300,6 +274,7 @@ function _parseFunctionId(value: unknown): MoveFunctionId | null {
  * absent or carries no `::` separator.
  */
 function _addressOf(value: unknown): string | null {
+  /* v8 ignore next -- every call site passes an already-stringified type */
   if (typeof value !== "string") return null;
   const i = value.indexOf("::");
   return i > 0 ? value.slice(0, i) : null;
@@ -310,6 +285,7 @@ function _addressOf(value: unknown): string | null {
  * Returns `null` when fewer than two segments are present.
  */
 function _moduleOf(value: unknown): string | null {
+  /* v8 ignore next -- only ever called with an already-stringified event type */
   if (typeof value !== "string") return null;
   const parts = value.split("::");
   return parts.length >= 2 ? `${parts[0]}::${parts[1]}` : null;
@@ -473,13 +449,12 @@ function _coinStoreIndex(changes: unknown[]): Map<string, string> {
  * type string, returning `COIN`. Returns `null` for any other resource type.
  */
 function _coinOfStore(resourceType: string): string | null {
+  if (!resourceType.startsWith("0x1::coin::CoinStore<")) {
+    return null;
+  }
   const open = resourceType.indexOf("<");
   const close = resourceType.lastIndexOf(">");
-  if (
-    !resourceType.startsWith("0x1::coin::CoinStore<") ||
-    open < 0 ||
-    close <= open
-  ) {
+  if (close <= open) {
     return null;
   }
   return resourceType.slice(open + 1, close);
