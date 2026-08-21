@@ -7,9 +7,13 @@ export default defineConfig((_config) => ({
     testTimeout: 80000,
     coverage: {
       enabled: true,
+      provider: "v8",
+      all: true,
+      include: ["src/**/*.ts"], // Ignore built distribution bundles.
+      exclude: ["**/*.d.ts"],
       reporter: ["text", "json-summary", "json", "lcov"],
       reportOnFailure: true,
-      exclude: ["./*.config.ts", "./bin/version.ts"],
+      thresholds: { lines: 100, functions: 100, branches: 100, statements: 100 },
     },
   },
 }));
