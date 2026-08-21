@@ -1,7 +1,7 @@
 # kinetics-ts
 
 [![npm](https://badge.fury.io/js/@choosek%2Fkinetics.svg)](https://www.npmjs.com/package/@choosek/kinetics)
-[![ci](https://github.com/choosek/kinetics-ts/actions/workflows/ci.yaml/badge.svg)](https://github.com/choosek/kinetics-ts/actions)
+[![version-publish](https://github.com/choosek/kinetics-ts/actions/workflows/version-publish.yaml/badge.svg)](https://github.com/choosek/kinetics-ts/actions)
 [![coveralls](https://coveralls.io/repos/github/choosek/kinetics-ts/badge.svg?branch=main)](https://coveralls.io/github/choosek/kinetics-ts)
 
 Library for static analysis of transactions across the [Move](https://move-language.github.io/move/) ecosystem — [Sui](https://sui.io/), [Aptos](https://aptos.dev/), and [Movement](https://movementnetwork.xyz/) — spanning both the object model of Sui [Programmable Transaction Blocks (PTBs)](https://docs.sui.io/concepts/transactions/prog-txn-blocks) and the account model of the Aptos and Movement [Move VM](https://move-language.github.io/move/).
