@@ -49,7 +49,14 @@ describe("PTB argument source encodings", () => {
     const block = {
       inputs: [{ type: "object", objectId: "0xa" }],
       transactions: [
-        { MoveCall: { package: "0x1", module: "m", function: "a", arguments: [] } },
+        {
+          MoveCall: {
+            package: "0x1",
+            module: "m",
+            function: "a",
+            arguments: [],
+          },
+        },
         {
           MoveCall: {
             package: "0x1",
@@ -128,7 +135,14 @@ describe("PTB argument source encodings", () => {
     const b1 = kinetics.analyzePtb({
       inputs: [],
       transactions: [
-        { MoveCall: { package: "0x1", module: "m", functionName: "f", arguments: [] } },
+        {
+          MoveCall: {
+            package: "0x1",
+            module: "m",
+            functionName: "f",
+            arguments: [],
+          },
+        },
       ],
     } as unknown as kinetics.ProgrammableTransactionBlock);
     expect(b1.commands[0].detail.function).toBe("f");
@@ -136,7 +150,14 @@ describe("PTB argument source encodings", () => {
     const b2 = kinetics.analyzePtb({
       inputs: [],
       transactions: [
-        { MoveCall: { package: "0x1", module: "m", function_name: "g", arguments: [] } },
+        {
+          MoveCall: {
+            package: "0x1",
+            module: "m",
+            function_name: "g",
+            arguments: [],
+          },
+        },
       ],
     } as unknown as kinetics.ProgrammableTransactionBlock);
     expect(b2.commands[0].detail.function).toBe("g");
@@ -260,7 +281,11 @@ describe("gas extraction across effect shapes", () => {
 
   test("the top-level gasSummary shape is read", () => {
     const g = kinetics.extractGas({
-      gasSummary: { computationCost: "10", storageCost: "5", storageRebate: "2" },
+      gasSummary: {
+        computationCost: "10",
+        storageCost: "5",
+        storageRebate: "2",
+      },
     } as unknown as kinetics.Effects);
     expect(g.net).toBe(13);
   });
@@ -336,9 +361,7 @@ describe("PTB structural fallbacks", () => {
 /* ======================================================================== */
 
 /** Build a minimal entry-function transaction, overriding fields as needed. */
-function moveTx(
-  over: Record<string, unknown> = {},
-): kinetics.MoveTransaction {
+function moveTx(over: Record<string, unknown> = {}): kinetics.MoveTransaction {
   return {
     type: "user_transaction",
     sender: "0xs",
@@ -392,8 +415,9 @@ describe("Move payload kinds and defaults", () => {
 
   test("an unrecognized or missing payload is Unknown", () => {
     expect(
-      kinetics.analyzeMoveTransaction(moveTx({ payload: { type: "brand_new" } }))
-        .summary.payloadKind,
+      kinetics.analyzeMoveTransaction(
+        moveTx({ payload: { type: "brand_new" } }),
+      ).summary.payloadKind,
     ).toBe(kinetics.MovePayloadKind.Unknown);
     expect(
       kinetics.analyzeMoveTransaction(moveTx({ payload: undefined })).summary
@@ -422,7 +446,12 @@ describe("Move payload kinds and defaults", () => {
     expect(
       kinetics.analyzeMoveTransaction(
         moveTx({
-          payload: { type: "script_payload", code: {}, type_arguments: [], arguments: [] },
+          payload: {
+            type: "script_payload",
+            code: {},
+            type_arguments: [],
+            arguments: [],
+          },
         }),
       ).payload.scriptByteSize,
     ).toBeNull();
@@ -487,9 +516,17 @@ describe("Move write-set categories", () => {
           arguments: [],
         },
         changes: [
-          { type: "write_module", address: "0xpkg", data: { abi: { name: "mod" } } },
+          {
+            type: "write_module",
+            address: "0xpkg",
+            data: { abi: { name: "mod" } },
+          },
           { type: "write_module", address: "0xpkg2", data: {} }, // no abi.name
-          { type: "delete_resource", address: "0xacc", data: { type: "0xpkg::mod::Thing" } },
+          {
+            type: "delete_resource",
+            address: "0xacc",
+            data: { type: "0xpkg::mod::Thing" },
+          },
           { type: "delete_module", address: "0xpkg3", data: {} },
           { type: "write_table_item", handle: "0xh", data: {} },
           { type: "write_resource", address: "0xr", data: {} }, // no data.type
@@ -532,13 +569,20 @@ describe("Move events and balance movements", () => {
         events: [
           {
             type: "0x1::coin::CoinWithdraw",
-            data: { account: "0xA", coin_type: "0x1::aptos_coin::AptosCoin", amount: "10" },
+            data: {
+              account: "0xA",
+              coin_type: "0x1::aptos_coin::AptosCoin",
+              amount: "10",
+            },
           },
           {
             type: "0x1::fungible_asset::Withdraw",
             data: { owner: "0xB", store: "0xstore", amount: "20" },
           },
-          { type: "0x1::fungible_asset::Deposit", data: { store: "0xC", amount: "30" } },
+          {
+            type: "0x1::fungible_asset::Deposit",
+            data: { store: "0xC", amount: "30" },
+          },
           {
             type: "0x1::coin::CoinDeposit",
             data: { metadata: "0x1::x::Y", account: "0xD", amount: "40" },
@@ -574,7 +618,11 @@ describe("Move events and balance movements", () => {
           },
         ],
         changes: [
-          { type: "write_resource", address: "0xs", data: { type: "0x1::coin::CoinStore<broken" } },
+          {
+            type: "write_resource",
+            address: "0xs",
+            data: { type: "0x1::coin::CoinStore<broken" },
+          },
           { type: "write_resource", address: "0xs2", data: {} }, // no data.type
         ],
       }),
@@ -595,7 +643,14 @@ describe("PTB numeric, argument, and command guards", () => {
     const a = kinetics.analyzePtb({
       inputs: [],
       transactions: [
-        { MoveCall: { package: "0x1", module: "m", function: "f", arguments: [{ Input: 3n }] } },
+        {
+          MoveCall: {
+            package: "0x1",
+            module: "m",
+            function: "f",
+            arguments: [{ Input: 3n }],
+          },
+        },
       ],
     } as unknown as kinetics.ProgrammableTransactionBlock);
     expect(a.commands[0].inputs[0].kind).toBe(kinetics.ArgumentKind.Input);
@@ -605,7 +660,9 @@ describe("PTB numeric, argument, and command guards", () => {
   test("a MoveCall with no arguments field yields no inputs", () => {
     const a = kinetics.analyzePtb({
       inputs: [],
-      transactions: [{ MoveCall: { package: "0x1", module: "m", function: "f" } }],
+      transactions: [
+        { MoveCall: { package: "0x1", module: "m", function: "f" } },
+      ],
     } as unknown as kinetics.ProgrammableTransactionBlock);
     expect(a.commands[0].kind).toBe(kinetics.CommandKind.MoveCall);
     expect(a.commands[0].inputs.length).toBe(0);
@@ -662,7 +719,11 @@ describe("Move payload defensive branches", () => {
   test("an entry function with no function field yields a null function", () => {
     const a = kinetics.analyzeMoveTransaction(
       moveTx({
-        payload: { type: "entry_function_payload", type_arguments: [], arguments: [] },
+        payload: {
+          type: "entry_function_payload",
+          type_arguments: [],
+          arguments: [],
+        },
       }),
     );
     expect(a.summary.payloadKind).toBe(kinetics.MovePayloadKind.EntryFunction);

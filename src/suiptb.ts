@@ -896,7 +896,9 @@ function taintAnalysis(commands: Command[], inputs: Input[]): Taint {
       kind,
       label: _commandLabel(command),
       // Every command has a taint entry set in the loop above.
-      taintedBy: [...taint.get(`cmd:${command.index}`)!],
+      taintedBy: [
+        ...(taint.get(`cmd:${command.index}`) as Set<number | string>),
+      ],
     });
   }
 
