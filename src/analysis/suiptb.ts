@@ -21,7 +21,7 @@ import {
   getField as _get,
   isSimpleObject as _isSimpleObject,
   toNumber as _toNumber,
-} from "./common";
+} from "../common";
 
 /**
  * Enumeration of the argument categories that can appear within a PTB command.

@@ -1,7 +1,7 @@
 {
   "name": "@choosek/kinetics",
-  "version": "0.7.0",
-  "description": "Library for static analysis of transactions across the Move ecosystem.",
+  "version": "0.8.0",
+  "description": "Library that provides static analysis and simulation functionalities for the Move ecosystem.",
   "license": "MIT",
   "homepage": "https://github.com/choosek/kinetics-ts",
   "repository": {

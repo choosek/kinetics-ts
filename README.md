@@ -4,11 +4,13 @@
 [![lint-check-test-cover](https://github.com/choosek/kinetics-ts/actions/workflows/lint-check-test-cover.yaml/badge.svg)](https://github.com/choosek/kinetics-ts/actions)
 [![coveralls](https://coveralls.io/repos/github/choosek/kinetics-ts/badge.svg?branch=main)](https://coveralls.io/github/choosek/kinetics-ts)
 
-Library for static analysis of transactions across the [Move](https://move-language.github.io/move/) ecosystem — [Sui](https://sui.io/), [Aptos](https://aptos.dev/), and [Movement](https://movementnetwork.xyz/) — spanning both the object model of Sui [Programmable Transaction Blocks (PTBs)](https://docs.sui.io/concepts/transactions/prog-txn-blocks) and the account model of the Aptos and Movement [Move VM](https://move-language.github.io/move/).
+Library for static analysis and simulation of transactions across the [Move](https://move-language.github.io/move/) ecosystem — [Sui](https://sui.io/), [Aptos](https://aptos.dev/), and [Movement](https://movementnetwork.xyz/) — spanning both the object model of Sui [Programmable Transaction Blocks (PTBs)](https://docs.sui.io/concepts/transactions/prog-txn-blocks) and the account model of the Aptos and Movement [Move VM](https://move-language.github.io/move/).
 
 ## Purpose
 
 This library statically analyzes a transaction and derives its analyses entirely without network access or transaction signing. What it computes is determined by the chain's execution model, of which two are represented across the three supported chains: the object model of Sui, in which a transaction is a dataflow program, and the account and global-storage model of Aptos and Movement, in which a transaction carries a single payload. Each analysis is a pure, deterministic, dependency-free function of a transaction supplied as a plain object; none reads the network or signs anything.
+
+The library additionally offers *simulation*: rather than reading a transaction, it constructs one and executes it against a chain's current state to obtain the effects it would have if submitted — the balances that would move, the state that would change, and the gas it would cost — without signing or broadcasting it. Simulation necessarily reaches the network, but the library issues no requests of its own; each is delegated to a transport the caller supplies, so it remains dependency-free and runs unchanged in a browser, on a server, or behind a public API. Because the simulated effects are returned in the same form an executed transaction produces, they are interpreted through the same analyzers, and what a transaction *would* do is reported in the same terms as what a transaction *did*. Simulation is described in the [Simulation](#simulation) section.
 
 ### Sui
 
@@ -33,7 +35,7 @@ The library can be imported in the usual way:
 ```ts
 import * as kinetics from "@choosek/kinetics";
 ```
-The analyzer has no runtime dependencies. It exposes one entry point per execution model — `analyzePtb` for Sui and `analyzeMoveTransaction` for Aptos and Movement — each of which takes a transaction expressed as a plain object and returns a plain analysis object. The input accepted for each chain, and the analyses each entry point computes, are described in the per-chain subsections below.
+The library has no runtime dependencies. For analysis it exposes one entry point per execution model — `analyzePtb` for Sui and `analyzeMoveTransaction` for Aptos and Movement — each of which takes a transaction expressed as a plain object and returns a plain analysis object; the input accepted for each chain, and the analyses each computes, are described in the per-chain subsections below. For simulation it exposes `simulate`, which builds a transaction and executes it against live chain state through a transport the caller injects; it is described in the [Simulation](#simulation) section.
 
 ### Sui
 
@@ -165,6 +167,59 @@ const analysis = kinetics.analyzePtb(ptb, effects);
 console.log(analysis.gas.net);                          // 2490000
 console.log(kinetics.mistToSui(analysis.gas.net));      // "0.002490000"
 console.log(analysis.resources.conservation?.netObjectDelta); // 1
+```
+
+## Simulation
+
+Analysis reads a transaction that already exists; *simulation* constructs one and asks a chain what it would do. Given a description of an intended transaction, `simulate` builds it, executes it against the chain's current state through the network's own dry-run facility, and returns the effects it would have if submitted — whether it would succeed, the balances that would move, the state entries that would change, and the gas it would cost — without signing or broadcasting anything. Those effects are returned in the same representation an executed transaction produces, so they are interpreted through the analyzers described above: a simulated Sui transaction is passed through `analyzePtb` and a simulated Aptos or Movement transaction through `analyzeMoveTransaction`. A counterfactual is thereby reported in the same terms as a historical transaction.
+
+### Injected Transport
+
+Simulation is the one capability that must reach the network, yet the library performs no I/O itself. Each request it needs to make is expressed as a plain object and passed to a `Transport` — a function `(request) => Promise<response>` the caller supplies — which performs the request and returns the parsed JSON. The library thus depends on no HTTP client, SDK, or endpoint, and the same simulation core runs wherever a transport can be provided: in a browser against a same-origin proxy, on a server against an RPC provider, or behind a public API. A request is either a Sui JSON-RPC call, `{ chain, jsonrpc: { method, params } }`, or an Aptos-style REST call, `{ chain, rest: { method, path, query, body } }`; the transport is responsible for reaching the endpoint for the network the intent names and returning its response.
+
+### The `simulate` Entry Point
+
+`simulate(intent, transport)` takes a `SimulationIntent` and a `Transport` and resolves to a uniform `SimulationResult`. The intent is a discriminated union whose implemented case is a native-coin `transfer`, stated as a wallet would state it: `{ kind: "transfer", chain, network, sender, recipient, amount, symbol, decimals }`, where `amount` is a decimal string in whole coins and `symbol`/`decimals` name the native coin. The result reports the predicted `success` and VM `status`, the `gas` cost (both in the coin's smallest unit and rendered), the `balanceChanges` (each a magnitude, a `direction`, an asset, and the account it applies to), the number of state entries the transaction would touch, and — for richer display — the full `analyzePtb` or `analyzeMoveTransaction` analysis of the simulated effects. A `SimulationError` is thrown when the transaction cannot be built or the chain reports that it cannot be simulated. The individual request builders and response normalizers — among them `suiPaySuiRequest`, `parseSuiDryRun`, `aptosSimulateRequest`, and `parseAptosSimulation` — are each exported, so a caller may drive any single step directly.
+
+### Per-Chain Mechanics
+
+On Sui, the transfer is assembled by the fullnode rather than the client: the sender's coins are listed with `suix_getCoins`, the transfer is built by the transaction-builder method `unsafe_paySui`, and the resulting bytes are executed with `sui_dryRunTransactionBlock`, whose effects feed `analyzePtb`. Building on the node avoids client-side transaction serialization but requires an endpoint on which the `unsafe_*` builder methods are enabled; one that has disabled them reports the builder method as not found. On Aptos and Movement, which share a REST surface, simulation needs no signature: the sender's sequence number is read from `GET /accounts/{address}`, the sender's public key is recovered from its most recent transaction — so the sender must have transacted at least once before — and a `SignedTransaction` bearing that key and a placeholder signature is submitted to `POST /transactions/simulate` with gas estimation enabled, the returned `UserTransaction` feeding `analyzeMoveTransaction`.
+
+### Example
+
+The example below simulates a transfer on Aptos through a transport that forwards each request to an RPC endpoint; the same code simulates on Sui or Movement by changing the intent's `chain`, `symbol`, and `decimals`:
+```ts
+import * as kinetics from "@choosek/kinetics";
+
+// A transport reaches the network however the host prefers. `request` is either
+// { chain, jsonrpc: { method, params } } or { chain, rest: { method, path, query, body } };
+// route it to an endpoint for the network the intent names and return the JSON.
+const transport = async (request) => {
+  const res = await fetch("https://your-rpc-proxy.example/rpc", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  return res.json();
+};
+
+const result = await kinetics.simulate(
+  {
+    kind: "transfer",
+    chain: "aptos",
+    network: "mainnet",
+    sender: "0x\u2026",      // a funded account that has transacted at least once
+    recipient: "0x\u2026",
+    amount: "1.25",
+    symbol: "APT",
+    decimals: 8,
+  },
+  transport,
+);
+
+console.log(result.success);         // whether it would succeed if submitted
+console.log(result.gas.formatted);   // e.g. "0.00150000"
+console.log(result.balanceChanges);  // the movements it would cause
 ```
 
 ## Development

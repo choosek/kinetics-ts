@@ -32,7 +32,7 @@ import {
   isSimpleObject as _isObject,
   toNumber as _toNumber,
   toStringOrNull as _toStringOrNull,
-} from "./common";
+} from "../common";
 
 /**
  * Enumeration of the payload categories an Aptos/Movement user transaction can

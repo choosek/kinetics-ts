@@ -2,8 +2,8 @@
  * Coverage-completing unit tests.
  *
  * These exercise the source encodings, command kinds, effect shapes, and
- * defensive fallbacks that the functional suites in `kinetics.test.ts` and
- * `movevm.test.ts` do not reach: GraphQL argument/input encodings, positional
+ * defensive fallbacks that the functional suites in `suiptb.test.ts`
+ * and `movevm.test.ts` do not reach: GraphQL argument/input encodings, positional
  * command bodies, the `MakeMoveVec`/`Publish`/`Upgrade` commands, the several
  * gas and object-change effect shapes, and the account-model edge cases
  * (payload kinds, write-set categories, balance-event field variants, and
@@ -15,7 +15,7 @@ import { describe, expect, test } from "vitest";
 import * as kinetics from "#/lib";
 
 /* ======================================================================== */
-/* PTB analyzer (lib.ts)                                                     */
+/* PTB analyzer (suiptb.ts)                                                  */
 /* ======================================================================== */
 
 describe("PTB argument source encodings", () => {
