@@ -10,9 +10,11 @@
 // public API (transport = a server-side fetch) without change.
 //
 // How each chain is simulated (all against live mainnet/testnet state):
-//   - Sui: the fullnode builds the transfer with `unsafe_paySui`, then
-//     `sui_dryRunTransactionBlock` executes it and returns effects, balance
-//     changes, and object changes. The effects feed `analyzePtb`.
+//   - Sui: the transfer PTB is built locally into BCS transaction-kind bytes
+//     and dry-run through GraphQL `dryRunTransactionBlock` (with `txMeta`
+//     supplying the sender and letting the node select gas), returning the
+//     status, balance changes, gas, and object changes. Sui deprecated
+//     JSON-RPC on public fullnodes, so no `unsafe_*` builder call is used.
 //   - Aptos/Movement (shared REST surface): `POST /transactions/simulate`
 //     runs the transaction with signature verification disabled; the returned
 //     `UserTransaction` feeds `analyzeMoveTransaction` directly.
@@ -26,7 +28,7 @@ import {
   type MoveAnalysis,
   subunitsToCoin,
 } from "./analysis/movevm";
-import { type Analysis, analyzePtb } from "./analysis/suiptb";
+import type { Analysis } from "./analysis/suiptb";
 
 /** A chain Kinetics can simulate against. */
 export type SimulationChain = "sui" | "aptos" | "movement";
@@ -57,6 +59,8 @@ export interface TransportRequest {
   chain: SimulationChain;
   /** Sui JSON-RPC call. */
   jsonrpc?: { method: string; params: unknown[] };
+  /** Sui GraphQL call (query + variables). */
+  graphql?: { query: string; variables?: Record<string, unknown> };
   /** Aptos/Movement REST call. */
   rest?: {
     method: "GET" | "POST";
@@ -68,9 +72,9 @@ export interface TransportRequest {
 
 /**
  * Performs one RPC request and resolves with the parsed upstream JSON. For a
- * Sui JSON-RPC call that is the `{ jsonrpc, result, error }` envelope; for a
- * REST call it is the response body. Implementations supply the transport
- * (endpoint, auth, CORS handling); this module supplies the requests.
+ * Sui GraphQL call that is the `{ data, errors }` envelope; for a REST call it
+ * is the response body. Implementations supply the transport (endpoint, auth,
+ * CORS handling); this module supplies the requests.
  */
 export type Transport = (req: TransportRequest) => Promise<unknown>;
 
@@ -156,110 +160,237 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// Sui: unsafe_paySui (fullnode builds) -> sui_dryRunTransactionBlock
+// Sui: build the transfer PTB locally (BCS) -> GraphQL dryRunTransactionBlock
 // ---------------------------------------------------------------------------
 
 const SUI_TYPE = "0x2::sui::SUI";
-const SUI_GAS_BUDGET = "50000000"; // 0.05 SUI ceiling for the dry run
 
-/** JSON-RPC request to list a sender's SUI coins. */
-export function suiGetCoinsRequest(sender: string): TransportRequest {
-  return {
-    chain: "sui",
-    jsonrpc: { method: "suix_getCoins", params: [sender, SUI_TYPE, null, 50] },
-  };
+// --- BCS helpers (just enough to encode a transfer's TransactionKind) --------
+
+/** Little-endian u64 as 8 bytes. */
+function u64ToBytes(value: bigint): number[] {
+  const out: number[] = [];
+  let v = value;
+  for (let i = 0; i < 8; i++) {
+    out.push(Number(v & 0xffn));
+    v >>= 8n;
+  }
+  return out;
 }
 
-/** JSON-RPC request that asks the fullnode to build the transfer transaction. */
-export function suiPaySuiRequest(
-  intent: TransferIntent,
-  coinIds: string[],
+/** A `0x…` hex address as exactly 32 bytes (left-padded). */
+function addressToBytes(addr: string): number[] {
+  const hex = (addr.startsWith("0x") ? addr.slice(2) : addr).toLowerCase();
+  if (!/^[0-9a-f]*$/.test(hex) || hex.length > 64) {
+    throw new SimulationError(`invalid address: ${addr}`);
+  }
+  const padded = hex.padStart(64, "0");
+  const out: number[] = [];
+  for (let i = 0; i < 64; i += 2) {
+    out.push(Number.parseInt(padded.slice(i, i + 2), 16));
+  }
+  return out;
+}
+
+/**
+ * Standard Base64 of a byte array (no runtime dependency). The caller only
+ * ever passes a whole number of 3-byte groups (a transfer kind is 63 bytes),
+ * so no padding is required.
+ */
+function bytesToBase64(bytes: number[]): string {
+  const table =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    out +=
+      table[(n >> 18) & 63] +
+      table[(n >> 12) & 63] +
+      table[(n >> 6) & 63] +
+      table[n & 63];
+  }
+  return out;
+}
+
+/**
+ * Build the BCS `TransactionKind` bytes for a native SUI transfer, Base64
+ * encoded and ready for `dryRunTransactionBlock`. The programmable block is
+ * `SplitCoins(GasCoin, [amount])` then `TransferObjects([split], recipient)` —
+ * the same shape a wallet produces — with the amount and recipient as pure
+ * inputs. Because the dry run supplies gas via `txMeta`, no coin object
+ * references are needed and the whole thing serializes offline.
+ */
+export function buildSuiTransferKind(intent: TransferIntent): string {
+  const amount = u64ToBytes(BigInt(toSubunits(intent.amount, intent.decimals)));
+  const recipient = addressToBytes(intent.recipient);
+  // Every length and index below is < 128, so each BCS ULEB128 prefix is a
+  // single byte and each Argument index is a little-endian u16 (`i, 0`).
+  const bytes = [
+    0x00, // TransactionKind::ProgrammableTransaction
+    0x02, // inputs: length 2
+    0x00,
+    0x08,
+    ...amount, //    [0] CallArg::Pure(u64 amount), 8 bytes
+    0x00,
+    0x20,
+    ...recipient, // [1] CallArg::Pure(address), 32 bytes
+    0x02, // commands: length 2
+    // [0] Command::SplitCoins(Argument::GasCoin, [Argument::Input(0)])
+    0x02,
+    0x00,
+    0x01,
+    0x01,
+    0x00,
+    0x00,
+    // [1] Command::TransferObjects([NestedResult(0,0)], Argument::Input(1))
+    0x01,
+    0x01,
+    0x03,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x01,
+    0x01,
+    0x00,
+  ];
+  return bytesToBase64(bytes);
+}
+
+// --- Sui GraphQL dry run -----------------------------------------------------
+
+const SUI_DRY_RUN_QUERY = `query DryRun($tx: String!, $sender: SuiAddress!) {
+  dryRunTransactionBlock(txBytes: $tx, txMeta: { sender: $sender }) {
+    error
+    transaction {
+      effects {
+        status
+        errors
+        gasEffects {
+          gasSummary {
+            computationCost
+            storageCost
+            storageRebate
+            nonRefundableStorageFee
+          }
+        }
+        balanceChanges {
+          nodes {
+            owner {
+              address
+            }
+            amount
+            coinType {
+              repr
+            }
+          }
+        }
+        objectChanges {
+          nodes {
+            address
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * GraphQL request that dry-runs Base64-encoded transaction-kind bytes as
+ * `sender`, letting the node fill in gas (`txMeta`). This is the supported
+ * replacement for the retired `sui_dryRunTransactionBlock` JSON-RPC method.
+ */
+export function suiDryRunRequest(
+  txKindBase64: string,
+  sender: string,
 ): TransportRequest {
-  const amount = toSubunits(intent.amount, intent.decimals);
   return {
     chain: "sui",
-    jsonrpc: {
-      method: "unsafe_paySui",
-      params: [
-        intent.sender,
-        coinIds,
-        [intent.recipient],
-        [amount],
-        SUI_GAS_BUDGET,
-      ],
+    graphql: {
+      query: SUI_DRY_RUN_QUERY,
+      variables: { tx: txKindBase64, sender },
     },
   };
 }
 
-/** JSON-RPC request to dry-run built transaction bytes. */
-export function suiDryRunRequest(txBytes: string): TransportRequest {
-  return {
-    chain: "sui",
-    jsonrpc: { method: "sui_dryRunTransactionBlock", params: [txBytes] },
-  };
+/** Format integer subunits as a fixed-`decimals` string (2588000 -> 0.002588000). */
+function formatUnits(subunits: bigint, decimals: number): string {
+  const negative = subunits < 0n;
+  const digits = (negative ? -subunits : subunits)
+    .toString()
+    .padStart(decimals + 1, "0");
+  const whole = digits.slice(0, digits.length - decimals);
+  const frac = digits.slice(digits.length - decimals);
+  return `${negative ? "-" : ""}${whole}.${frac}`;
 }
 
-/** Unwrap a Sui JSON-RPC envelope, surfacing errors as SimulationError. */
-function suiResult(envelope: unknown): unknown {
-  if (!isObject(envelope)) {
-    throw new SimulationError("malformed Sui RPC response");
-  }
-  if (isObject(envelope.error)) {
-    const message = envelope.error.message;
-    throw new SimulationError(
-      `Sui RPC error: ${typeof message === "string" ? message : JSON.stringify(envelope.error)}`,
-    );
-  }
-  return envelope.result;
+/** Parse a GraphQL BigInt scalar (serialized as a string), defaulting to 0n. */
+function toBigInt(value: unknown): bigint {
+  return typeof value === "string" && /^-?\d+$/.test(value)
+    ? BigInt(value)
+    : 0n;
 }
 
-function suiOwnerAddress(owner: unknown): string {
-  if (isObject(owner) && typeof owner.AddressOwner === "string") {
-    return owner.AddressOwner;
-  }
-  if (typeof owner === "string") return owner;
-  return "shared/immutable";
-}
-
-/** Turn a dry-run response into the uniform result. */
+/** Turn a GraphQL `dryRunTransactionBlock` response into the uniform result. */
 export function parseSuiDryRun(
   intent: TransferIntent,
-  dryRun: unknown,
+  response: unknown,
 ): SimulationResult {
-  if (!isObject(dryRun)) {
+  if (!isObject(response)) {
     throw new SimulationError("malformed Sui dry-run response");
   }
-  const effects = isObject(dryRun.effects) ? dryRun.effects : {};
-  const statusObj = isObject(effects.status) ? effects.status : {};
-  const status =
-    typeof statusObj.status === "string" ? statusObj.status : "unknown";
-  const success = status === "success";
-  const error =
-    !success && typeof statusObj.error === "string" ? statusObj.error : null;
+  if (Array.isArray(response.errors) && response.errors.length > 0) {
+    const first = response.errors[0];
+    const message =
+      isObject(first) && typeof first.message === "string"
+        ? first.message
+        : JSON.stringify(response.errors);
+    throw new SimulationError(`Sui GraphQL error: ${message}`);
+  }
+  const data = isObject(response.data) ? response.data : {};
+  const dryRun = isObject(data.dryRunTransactionBlock)
+    ? data.dryRunTransactionBlock
+    : {};
+  if (typeof dryRun.error === "string" && dryRun.error.length > 0) {
+    throw new SimulationError(`Sui dry-run error: ${dryRun.error}`);
+  }
+  const txn = isObject(dryRun.transaction) ? dryRun.transaction : {};
+  const effects = isObject(txn.effects) ? txn.effects : {};
+
+  const statusStr =
+    typeof effects.status === "string" ? effects.status.toUpperCase() : "";
+  const success = statusStr === "SUCCESS";
+  const errorsStr =
+    typeof effects.errors === "string" && effects.errors.length > 0
+      ? effects.errors
+      : null;
+  const status = success ? "success" : (errorsStr ?? "failure");
 
   // Gas: computation + storage - rebate, in MIST.
-  const gasUsed = isObject(effects.gasUsed) ? effects.gasUsed : {};
-  const num = (v: unknown) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-  };
+  const gasEffects = isObject(effects.gasEffects) ? effects.gasEffects : {};
+  const gasSummary = isObject(gasEffects.gasSummary)
+    ? gasEffects.gasSummary
+    : {};
   const gasSubunits =
-    num(gasUsed.computationCost) +
-    num(gasUsed.storageCost) -
-    num(gasUsed.storageRebate);
+    toBigInt(gasSummary.computationCost) +
+    toBigInt(gasSummary.storageCost) -
+    toBigInt(gasSummary.storageRebate);
 
   const balanceChanges: SimulatedBalanceChange[] = [];
-  const rawBalances = Array.isArray(dryRun.balanceChanges)
-    ? dryRun.balanceChanges
-    : [];
-  for (const change of rawBalances) {
+  const bcConn = isObject(effects.balanceChanges) ? effects.balanceChanges : {};
+  const bcNodes = Array.isArray(bcConn.nodes) ? bcConn.nodes : [];
+  for (const change of bcNodes) {
     if (!isObject(change)) continue;
     const amountStr = typeof change.amount === "string" ? change.amount : "0";
     const negative = amountStr.startsWith("-");
     const coinType =
-      typeof change.coinType === "string" ? change.coinType : SUI_TYPE;
+      isObject(change.coinType) && typeof change.coinType.repr === "string"
+        ? change.coinType.repr
+        : SUI_TYPE;
+    const owner = isObject(change.owner) ? change.owner : {};
     balanceChanges.push({
-      address: suiOwnerAddress(change.owner),
+      address:
+        typeof owner.address === "string" ? owner.address : "shared/immutable",
       asset: coinType,
       symbol: symbolOfType(coinType),
       amount: negative ? amountStr.slice(1) : amountStr,
@@ -268,38 +399,23 @@ export function parseSuiDryRun(
     });
   }
 
-  const objectChanges = Array.isArray(dryRun.objectChanges)
-    ? dryRun.objectChanges
-    : [];
-
-  // Best-effort rich analysis of the PTB from the dry-run's own input + effects.
-  let suiAnalysis: Analysis | undefined;
-  try {
-    const input = isObject(dryRun.input) ? dryRun.input : {};
-    const transaction = isObject(input.transaction) ? input.transaction : input;
-    suiAnalysis = analyzePtb(
-      transaction as Parameters<typeof analyzePtb>[0],
-      effects as Parameters<typeof analyzePtb>[1],
-    );
-  } catch {
-    suiAnalysis = undefined;
-  }
+  const ocConn = isObject(effects.objectChanges) ? effects.objectChanges : {};
+  const changeCount = Array.isArray(ocConn.nodes) ? ocConn.nodes.length : 0;
 
   return {
     chain: intent.chain,
     network: intent.network,
     success,
     status,
-    error,
+    error: success ? null : status,
     gas: {
-      amountSubunits: String(gasSubunits),
-      formatted: (gasSubunits / 10 ** 9).toFixed(9),
+      amountSubunits: gasSubunits.toString(),
+      formatted: formatUnits(gasSubunits, 9),
       symbol: intent.symbol,
     },
     balanceChanges,
-    changeCount: objectChanges.length,
-    suiAnalysis,
-    raw: dryRun,
+    changeCount,
+    raw: response,
   };
 }
 
@@ -307,29 +423,9 @@ async function simulateSui(
   intent: TransferIntent,
   transport: Transport,
 ): Promise<SimulationResult> {
-  const coins = suiResult(await transport(suiGetCoinsRequest(intent.sender)));
-  const coinList =
-    isObject(coins) && Array.isArray(coins.data) ? coins.data : [];
-  const coinIds = coinList
-    .map((c) =>
-      isObject(c) && typeof c.coinObjectId === "string" ? c.coinObjectId : null,
-    )
-    .filter((id): id is string => id !== null);
-  if (coinIds.length === 0) {
-    throw new SimulationError(
-      `sender holds no ${intent.symbol} coins on ${intent.network} to transfer`,
-    );
-  }
-
-  const built = suiResult(await transport(suiPaySuiRequest(intent, coinIds)));
-  if (!isObject(built) || typeof built.txBytes !== "string") {
-    throw new SimulationError(
-      "Sui fullnode did not return transaction bytes (does this endpoint enable unsafe_* builder methods?)",
-    );
-  }
-
-  const dryRun = suiResult(await transport(suiDryRunRequest(built.txBytes)));
-  return parseSuiDryRun(intent, dryRun);
+  const txKind = buildSuiTransferKind(intent);
+  const response = await transport(suiDryRunRequest(txKind, intent.sender));
+  return parseSuiDryRun(intent, response);
 }
 
 // ---------------------------------------------------------------------------
@@ -361,14 +457,15 @@ export function aptosRecentTxRequest(
 
 /**
  * Build the JSON `SignedTransaction` body for `/transactions/simulate`. The
- * signature is a placeholder — the simulate endpoint runs with signature
- * verification disabled — but the sender's real public key is required so the
- * account's auth-key check passes.
+ * `signature` is a placeholder authenticator (real signature bytes blanked) in
+ * the shape the sender's account actually uses — the simulate endpoint runs
+ * with verification disabled, but the authenticator's shape and public key must
+ * match the account's key type for its auth-key check to pass.
  */
 export function aptosSimulateRequest(
   intent: TransferIntent,
   sequenceNumber: string,
-  publicKey: string,
+  signature: unknown,
 ): TransportRequest {
   const amount = toSubunits(intent.amount, intent.decimals);
   const body = {
@@ -383,11 +480,7 @@ export function aptosSimulateRequest(
       type_arguments: [],
       arguments: [intent.recipient, amount],
     },
-    signature: {
-      type: "ed25519_signature",
-      public_key: publicKey,
-      signature: `0x${"0".repeat(128)}`,
-    },
+    signature,
   };
   return {
     chain: intent.chain,
@@ -404,17 +497,88 @@ export function aptosSimulateRequest(
   };
 }
 
-/** Extract the sender's ed25519 public key from a recent-transactions response. */
-export function extractPublicKey(recentTxns: unknown): string | null {
+/** Blank a `0x…` hex string to zeros of the same length (others unchanged). */
+function zeroHex(value: string): string {
+  return /^0x[0-9a-fA-F]*$/.test(value)
+    ? `0x${"0".repeat(value.length - 2)}`
+    : value;
+}
+
+/** Blank a signature field, which may be a hex string or `{ type, value }`. */
+function blankSignatureField(value: unknown): unknown {
+  if (typeof value === "string") return zeroHex(value);
+  if (Array.isArray(value)) return value.map(blankSignatureField);
+  if (isObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(value)) {
+      out[key] =
+        key === "value" && typeof inner === "string"
+          ? zeroHex(inner)
+          : blankSignatures(inner);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Deep-copy an authenticator, replacing every signature byte-string with zeros
+ * of the same length while leaving public keys, key types, and addresses
+ * intact — turning a real signature into a simulation placeholder.
+ */
+function blankSignatures(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(blankSignatures);
+  if (!isObject(node)) return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    out[key] =
+      key === "signature" || key === "signatures"
+        ? blankSignatureField(value)
+        : blankSignatures(value);
+  }
+  return out;
+}
+
+/** Wrap a sender's account authenticator as a lone-sender transaction signature. */
+function asTransactionSignature(auth: Record<string, unknown>): unknown {
+  const type = typeof auth.type === "string" ? auth.type : "";
+  // ed25519 / multi-ed25519 authenticators are valid transaction signatures on
+  // their own; single_key / multi_key are account authenticators, which a lone
+  // sender submits inside `single_sender`.
+  if (type === "ed25519_signature" || type === "multi_ed25519_signature") {
+    return blankSignatures(auth);
+  }
+  return { type: "single_sender", sender: blankSignatures(auth) };
+}
+
+/**
+ * Recover a simulation-ready sender signature from the account's most recent
+ * transaction. The account's own last transaction already carries an
+ * authenticator in exactly the shape the node expects for its key type (legacy
+ * ed25519, single-key, keyless, …), so we mirror that shape and only blank the
+ * signature bytes — no need to know whether the account is "old" or "new".
+ * Returns null when no usable authenticator is present.
+ */
+export function buildSenderSignature(recentTxns: unknown): unknown | null {
   const list = Array.isArray(recentTxns) ? recentTxns : [];
   for (const txn of list) {
     if (!isObject(txn) || !isObject(txn.signature)) continue;
     const sig = txn.signature;
-    if (typeof sig.public_key === "string") return sig.public_key;
-    // fee-payer/multi-agent wrap the sender's signature one level down
-    if (isObject(sig.sender) && typeof sig.sender.public_key === "string") {
-      return sig.sender.public_key;
+    const type = typeof sig.type === "string" ? sig.type : "";
+    // A lone-sender signature (legacy ed25519, multi-ed25519, or an already
+    // single_sender-wrapped account authenticator): mirror as-is.
+    if (
+      type === "ed25519_signature" ||
+      type === "multi_ed25519_signature" ||
+      type === "single_sender"
+    ) {
+      return blankSignatures(sig);
     }
+    // Fee-payer / multi-agent (or any shape that nests the sender): simulate as
+    // the sender alone.
+    if (isObject(sig.sender)) return asTransactionSignature(sig.sender);
+    // A bare account authenticator at the top level.
+    if (type.length > 0) return asTransactionSignature(sig);
   }
   return null;
 }
@@ -479,17 +643,17 @@ async function simulateMove(
   }
   const sequenceNumber = account.sequence_number;
 
-  const publicKey = extractPublicKey(
+  const signature = buildSenderSignature(
     await transport(aptosRecentTxRequest(intent.chain, intent.sender)),
   );
-  if (publicKey === null) {
+  if (signature === null) {
     throw new SimulationError(
       "could not determine the sender's public key (the account has no prior transactions to recover it from)",
     );
   }
 
   const simulation = await transport(
-    aptosSimulateRequest(intent, sequenceNumber, publicKey),
+    aptosSimulateRequest(intent, sequenceNumber, signature),
   );
   return parseAptosSimulation(intent, simulation);
 }
