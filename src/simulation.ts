@@ -10,13 +10,14 @@
 // public API (transport = a server-side fetch) without change.
 //
 // How each chain is simulated (all against live mainnet/testnet state):
-//   - Sui: the transfer PTB is built locally into BCS transaction-kind bytes
-//     and dry-run through GraphQL `dryRunTransactionBlock` (with `txMeta`
-//     supplying the sender and letting the node select gas), returning the
-//     status, balance changes, gas, and object changes. Sui deprecated
-//     JSON-RPC on public fullnodes, so no `unsafe_*` builder call is used.
-//   - Aptos/Movement (shared REST surface): `POST /transactions/simulate`
-//     runs the transaction with signature verification disabled; the returned
+//   - Sui: the transfer is built locally into BCS TransactionData bytes and
+//     simulated through GraphQL `simulateTransaction` (which selects the gas
+//     coin itself), returning status, balance changes, gas, and object
+//     changes. Sui retired JSON-RPC on public fullnodes; this is the
+//     supported replacement.
+//   - Aptos/Movement (shared REST surface): `POST /transactions/simulate` with
+//     a `no_account_signature`, which skips the sender's auth-key check so any
+//     account simulates — even one with no transaction history; the returned
 //     `UserTransaction` feeds `analyzeMoveTransaction` directly.
 //
 // This module models a native-coin transfer — the most common transaction and
@@ -160,135 +161,116 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// Sui: build the transfer PTB locally (BCS) -> GraphQL dryRunTransactionBlock
+// Sui: build the transfer locally (BCS TransactionData) -> simulateTransaction
 // ---------------------------------------------------------------------------
 
 const SUI_TYPE = "0x2::sui::SUI";
 
-// --- BCS helpers (just enough to encode a transfer's TransactionKind) --------
+// --- BCS + Base64 helpers (enough to encode a transfer's TransactionData) ----
 
-/** Little-endian u64 as 8 bytes. */
-function u64ToBytes(value: bigint): number[] {
-  const out: number[] = [];
+/** Little-endian hex (16 chars) for a u64 value. */
+function u64ToHexLE(value: bigint): string {
+  let hex = "";
   let v = value;
   for (let i = 0; i < 8; i++) {
-    out.push(Number(v & 0xffn));
+    hex += (Number(v & 0xffn)).toString(16).padStart(2, "0");
     v >>= 8n;
   }
-  return out;
+  return hex;
 }
 
-/** A `0x…` hex address as exactly 32 bytes (left-padded). */
-function addressToBytes(addr: string): number[] {
+/** A `0x…` address as 64 lowercase hex chars (32 bytes, left-padded). */
+function addressToHex(addr: string): string {
   const hex = (addr.startsWith("0x") ? addr.slice(2) : addr).toLowerCase();
   if (!/^[0-9a-f]*$/.test(hex) || hex.length > 64) {
     throw new SimulationError(`invalid address: ${addr}`);
   }
-  const padded = hex.padStart(64, "0");
-  const out: number[] = [];
-  for (let i = 0; i < 64; i += 2) {
-    out.push(Number.parseInt(padded.slice(i, i + 2), 16));
-  }
-  return out;
+  return hex.padStart(64, "0");
 }
 
-/**
- * Standard Base64 of a byte array (no runtime dependency). The caller only
- * ever passes a whole number of 3-byte groups (a transfer kind is 63 bytes),
- * so no padding is required.
- */
-function bytesToBase64(bytes: number[]): string {
+/** Standard Base64 of a hex string. */
+export function hexToBase64(hex: string): string {
   const table =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const bytes: number[] = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes.push(Number.parseInt(hex.slice(i, i + 2), 16));
+  }
   let out = "";
   for (let i = 0; i < bytes.length; i += 3) {
-    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
-    out +=
-      table[(n >> 18) & 63] +
-      table[(n >> 12) & 63] +
-      table[(n >> 6) & 63] +
-      table[n & 63];
+    const has1 = i + 1 < bytes.length;
+    const has2 = i + 2 < bytes.length;
+    const n =
+      (bytes[i] << 16) |
+      ((has1 ? bytes[i + 1] : 0) << 8) |
+      (has2 ? bytes[i + 2] : 0);
+    out += table[(n >> 18) & 63];
+    out += table[(n >> 12) & 63];
+    out += has1 ? table[(n >> 6) & 63] : "=";
+    out += has2 ? table[n & 63] : "=";
   }
   return out;
 }
 
 /**
- * Build the BCS `TransactionKind` bytes for a native SUI transfer, Base64
- * encoded and ready for `dryRunTransactionBlock`. The programmable block is
- * `SplitCoins(GasCoin, [amount])` then `TransferObjects([split], recipient)` —
- * the same shape a wallet produces — with the amount and recipient as pure
- * inputs. Because the dry run supplies gas via `txMeta`, no coin object
- * references are needed and the whole thing serializes offline.
+ * Build the BCS `TransactionData` for a native SUI transfer, Base64 encoded and
+ * ready to wrap for `simulateTransaction`. The programmable block is
+ * `SplitCoins(GasCoin, [amount])` then `TransferObjects([split], recipient)`.
+ * Gas payment is left empty and resolved by the node (`doGasSelection`); the
+ * price/budget are conservative hints it may re-estimate.
  */
-export function buildSuiTransferKind(intent: TransferIntent): string {
-  const amount = u64ToBytes(BigInt(toSubunits(intent.amount, intent.decimals)));
-  const recipient = addressToBytes(intent.recipient);
-  // Every length and index below is < 128, so each BCS ULEB128 prefix is a
-  // single byte and each Argument index is a little-endian u16 (`i, 0`).
-  const bytes = [
-    0x00, // TransactionKind::ProgrammableTransaction
-    0x02, // inputs: length 2
-    0x00,
-    0x08,
-    ...amount, //    [0] CallArg::Pure(u64 amount), 8 bytes
-    0x00,
-    0x20,
-    ...recipient, // [1] CallArg::Pure(address), 32 bytes
-    0x02, // commands: length 2
-    // [0] Command::SplitCoins(Argument::GasCoin, [Argument::Input(0)])
-    0x02,
-    0x00,
-    0x01,
-    0x01,
-    0x00,
-    0x00,
-    // [1] Command::TransferObjects([NestedResult(0,0)], Argument::Input(1))
-    0x01,
-    0x01,
-    0x03,
-    0x00,
-    0x00,
-    0x00,
-    0x00,
-    0x01,
-    0x01,
-    0x00,
-  ];
-  return bytesToBase64(bytes);
+export function buildSuiTransferData(intent: TransferIntent): string {
+  const amount = u64ToHexLE(BigInt(toSubunits(intent.amount, intent.decimals)));
+  const recipient = addressToHex(intent.recipient);
+  const sender = addressToHex(intent.sender);
+  // TransactionKind::ProgrammableTransaction, inputs then commands (every
+  // length and index prefix is a single BCS byte at this size).
+  const kind =
+    "00" + // ProgrammableTransaction
+    "02" + // inputs: 2
+    `0008${amount}` + // [0] Pure(u64 amount)
+    `0020${recipient}` + // [1] Pure(address)
+    "02" + // commands: 2
+    "020001010000" + // SplitCoins(GasCoin, [Input(0)])
+    "01010300000000010100"; // TransferObjects([NestedResult(0,0)], Input(1))
+  // gas_data { payment: [] (node selects), owner: sender, price, budget }.
+  const gasData = `00${sender}${u64ToHexLE(1000n)}${u64ToHexLE(50000000n)}`;
+  // TransactionData::V1 { kind, sender, gas_data, expiration: None }.
+  return hexToBase64(`00${kind}${sender}${gasData}00`);
 }
 
-// --- Sui GraphQL dry run -----------------------------------------------------
+// --- Sui transaction simulation (GraphQL) ------------------------------------
 
-const SUI_DRY_RUN_QUERY = `query DryRun($tx: String!, $sender: SuiAddress!) {
-  dryRunTransactionBlock(txBytes: $tx, txMeta: { sender: $sender }) {
-    error
-    transaction {
-      effects {
-        status
-        errors
-        gasEffects {
-          gasSummary {
-            computationCost
-            storageCost
-            storageRebate
-            nonRefundableStorageFee
-          }
+const SUI_SIMULATE_QUERY = `query Simulate($tx: JSON!) {
+  simulateTransaction(
+    transaction: $tx
+    checksEnabled: false
+    doGasSelection: true
+  ) {
+    effects {
+      status
+      gasEffects {
+        gasSummary {
+          computationCost
+          storageCost
+          storageRebate
+          nonRefundableStorageFee
         }
-        balanceChanges {
-          nodes {
-            owner {
-              address
-            }
-            amount
-            coinType {
-              repr
-            }
-          }
-        }
-        objectChanges {
-          nodes {
+      }
+      balanceChanges {
+        nodes {
+          owner {
             address
           }
+          amount
+          coinType {
+            repr
+          }
+        }
+      }
+      objectChanges {
+        nodes {
+          address
         }
       }
     }
@@ -296,19 +278,17 @@ const SUI_DRY_RUN_QUERY = `query DryRun($tx: String!, $sender: SuiAddress!) {
 }`;
 
 /**
- * GraphQL request that dry-runs Base64-encoded transaction-kind bytes as
- * `sender`, letting the node fill in gas (`txMeta`). This is the supported
- * replacement for the retired `sui_dryRunTransactionBlock` JSON-RPC method.
+ * GraphQL request that simulates a Base64 BCS `TransactionData`. Sui retired
+ * JSON-RPC on public fullnodes; `Query.simulateTransaction` is the supported
+ * replacement — it accepts pre-built transaction bytes as `{ bcs: { value } }`
+ * and selects the gas coin itself.
  */
-export function suiDryRunRequest(
-  txKindBase64: string,
-  sender: string,
-): TransportRequest {
+export function suiSimulateRequest(txDataBase64: string): TransportRequest {
   return {
     chain: "sui",
     graphql: {
-      query: SUI_DRY_RUN_QUERY,
-      variables: { tx: txKindBase64, sender },
+      query: SUI_SIMULATE_QUERY,
+      variables: { tx: { bcs: { value: txDataBase64 } } },
     },
   };
 }
@@ -324,20 +304,20 @@ function formatUnits(subunits: bigint, decimals: number): string {
   return `${negative ? "-" : ""}${whole}.${frac}`;
 }
 
-/** Parse a GraphQL BigInt scalar (serialized as a string), defaulting to 0n. */
+/** Parse a GraphQL BigInt scalar, which may be a JSON number or a string. */
 function toBigInt(value: unknown): bigint {
-  return typeof value === "string" && /^-?\d+$/.test(value)
-    ? BigInt(value)
-    : 0n;
+  if (typeof value === "number") return BigInt(Math.trunc(value));
+  if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
+  return 0n;
 }
 
-/** Turn a GraphQL `dryRunTransactionBlock` response into the uniform result. */
-export function parseSuiDryRun(
+/** Turn a GraphQL `simulateTransaction` response into the uniform result. */
+export function parseSuiSimulation(
   intent: TransferIntent,
   response: unknown,
 ): SimulationResult {
   if (!isObject(response)) {
-    throw new SimulationError("malformed Sui dry-run response");
+    throw new SimulationError("malformed Sui simulation response");
   }
   if (Array.isArray(response.errors) && response.errors.length > 0) {
     const first = response.errors[0];
@@ -348,23 +328,13 @@ export function parseSuiDryRun(
     throw new SimulationError(`Sui GraphQL error: ${message}`);
   }
   const data = isObject(response.data) ? response.data : {};
-  const dryRun = isObject(data.dryRunTransactionBlock)
-    ? data.dryRunTransactionBlock
+  const sim = isObject(data.simulateTransaction)
+    ? data.simulateTransaction
     : {};
-  if (typeof dryRun.error === "string" && dryRun.error.length > 0) {
-    throw new SimulationError(`Sui dry-run error: ${dryRun.error}`);
-  }
-  const txn = isObject(dryRun.transaction) ? dryRun.transaction : {};
-  const effects = isObject(txn.effects) ? txn.effects : {};
+  const effects = isObject(sim.effects) ? sim.effects : {};
 
-  const statusStr =
-    typeof effects.status === "string" ? effects.status.toUpperCase() : "";
-  const success = statusStr === "SUCCESS";
-  const errorsStr =
-    typeof effects.errors === "string" && effects.errors.length > 0
-      ? effects.errors
-      : null;
-  const status = success ? "success" : (errorsStr ?? "failure");
+  const success = effects.status === "SUCCESS";
+  const status = success ? "success" : "failure";
 
   // Gas: computation + storage - rebate, in MIST.
   const gasEffects = isObject(effects.gasEffects) ? effects.gasEffects : {};
@@ -423,9 +393,9 @@ async function simulateSui(
   intent: TransferIntent,
   transport: Transport,
 ): Promise<SimulationResult> {
-  const txKind = buildSuiTransferKind(intent);
-  const response = await transport(suiDryRunRequest(txKind, intent.sender));
-  return parseSuiDryRun(intent, response);
+  const txData = buildSuiTransferData(intent);
+  const response = await transport(suiSimulateRequest(txData));
+  return parseSuiSimulation(intent, response);
 }
 
 // ---------------------------------------------------------------------------
@@ -440,32 +410,17 @@ export function aptosAccountRequest(
   return { chain, rest: { method: "GET", path: `/accounts/${sender}` } };
 }
 
-/** REST request for the sender's most recent transaction (to recover its key). */
-export function aptosRecentTxRequest(
-  chain: SimulationChain,
-  sender: string,
-): TransportRequest {
-  return {
-    chain,
-    rest: {
-      method: "GET",
-      path: `/accounts/${sender}/transactions`,
-      query: { limit: 1 },
-    },
-  };
-}
-
 /**
  * Build the JSON `SignedTransaction` body for `/transactions/simulate`. The
- * `signature` is a placeholder authenticator (real signature bytes blanked) in
- * the shape the sender's account actually uses — the simulate endpoint runs
- * with verification disabled, but the authenticator's shape and public key must
- * match the account's key type for its auth-key check to pass.
+ * `no_account_signature` authenticator tells the node to skip the sender's
+ * auth-key check, so simulation works for any account — including fresh ones
+ * that have never sent a transaction (whose public key is therefore not
+ * recoverable from chain history). This is the wire equivalent of omitting
+ * `signerPublicKey` in the Aptos SDK's simulate flow.
  */
 export function aptosSimulateRequest(
   intent: TransferIntent,
   sequenceNumber: string,
-  signature: unknown,
 ): TransportRequest {
   const amount = toSubunits(intent.amount, intent.decimals);
   const body = {
@@ -480,7 +435,7 @@ export function aptosSimulateRequest(
       type_arguments: [],
       arguments: [intent.recipient, amount],
     },
-    signature,
+    signature: { type: "no_account_signature" },
   };
   return {
     chain: intent.chain,
@@ -495,92 +450,6 @@ export function aptosSimulateRequest(
       body,
     },
   };
-}
-
-/** Blank a `0x…` hex string to zeros of the same length (others unchanged). */
-function zeroHex(value: string): string {
-  return /^0x[0-9a-fA-F]*$/.test(value)
-    ? `0x${"0".repeat(value.length - 2)}`
-    : value;
-}
-
-/** Blank a signature field, which may be a hex string or `{ type, value }`. */
-function blankSignatureField(value: unknown): unknown {
-  if (typeof value === "string") return zeroHex(value);
-  if (Array.isArray(value)) return value.map(blankSignatureField);
-  if (isObject(value)) {
-    const out: Record<string, unknown> = {};
-    for (const [key, inner] of Object.entries(value)) {
-      out[key] =
-        key === "value" && typeof inner === "string"
-          ? zeroHex(inner)
-          : blankSignatures(inner);
-    }
-    return out;
-  }
-  return value;
-}
-
-/**
- * Deep-copy an authenticator, replacing every signature byte-string with zeros
- * of the same length while leaving public keys, key types, and addresses
- * intact — turning a real signature into a simulation placeholder.
- */
-function blankSignatures(node: unknown): unknown {
-  if (Array.isArray(node)) return node.map(blankSignatures);
-  if (!isObject(node)) return node;
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(node)) {
-    out[key] =
-      key === "signature" || key === "signatures"
-        ? blankSignatureField(value)
-        : blankSignatures(value);
-  }
-  return out;
-}
-
-/** Wrap a sender's account authenticator as a lone-sender transaction signature. */
-function asTransactionSignature(auth: Record<string, unknown>): unknown {
-  const type = typeof auth.type === "string" ? auth.type : "";
-  // ed25519 / multi-ed25519 authenticators are valid transaction signatures on
-  // their own; single_key / multi_key are account authenticators, which a lone
-  // sender submits inside `single_sender`.
-  if (type === "ed25519_signature" || type === "multi_ed25519_signature") {
-    return blankSignatures(auth);
-  }
-  return { type: "single_sender", sender: blankSignatures(auth) };
-}
-
-/**
- * Recover a simulation-ready sender signature from the account's most recent
- * transaction. The account's own last transaction already carries an
- * authenticator in exactly the shape the node expects for its key type (legacy
- * ed25519, single-key, keyless, …), so we mirror that shape and only blank the
- * signature bytes — no need to know whether the account is "old" or "new".
- * Returns null when no usable authenticator is present.
- */
-export function buildSenderSignature(recentTxns: unknown): unknown | null {
-  const list = Array.isArray(recentTxns) ? recentTxns : [];
-  for (const txn of list) {
-    if (!isObject(txn) || !isObject(txn.signature)) continue;
-    const sig = txn.signature;
-    const type = typeof sig.type === "string" ? sig.type : "";
-    // A lone-sender signature (legacy ed25519, multi-ed25519, or an already
-    // single_sender-wrapped account authenticator): mirror as-is.
-    if (
-      type === "ed25519_signature" ||
-      type === "multi_ed25519_signature" ||
-      type === "single_sender"
-    ) {
-      return blankSignatures(sig);
-    }
-    // Fee-payer / multi-agent (or any shape that nests the sender): simulate as
-    // the sender alone.
-    if (isObject(sig.sender)) return asTransactionSignature(sig.sender);
-    // A bare account authenticator at the top level.
-    if (type.length > 0) return asTransactionSignature(sig);
-  }
-  return null;
 }
 
 /** Turn a `/transactions/simulate` response into the uniform result. */
@@ -641,19 +510,8 @@ async function simulateMove(
       `account ${intent.sender} not found on ${intent.chain} ${intent.network}`,
     );
   }
-  const sequenceNumber = account.sequence_number;
-
-  const signature = buildSenderSignature(
-    await transport(aptosRecentTxRequest(intent.chain, intent.sender)),
-  );
-  if (signature === null) {
-    throw new SimulationError(
-      "could not determine the sender's public key (the account has no prior transactions to recover it from)",
-    );
-  }
-
   const simulation = await transport(
-    aptosSimulateRequest(intent, sequenceNumber, signature),
+    aptosSimulateRequest(intent, account.sequence_number),
   );
   return parseAptosSimulation(intent, simulation);
 }
