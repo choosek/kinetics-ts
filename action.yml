@@ -1,0 +1,88 @@
+name: "Kinetics Confidentiality"
+description: >-
+  Static confidentiality analysis for Move (Sui Seal access policies and Aptos
+  Confidential Assets) reported to GitHub code scanning as SARIF.
+author: "Choose K"
+branding:
+  icon: "lock"
+  color: "yellow"
+
+inputs:
+  path:
+    description: "Path(s) to scan for .move files."
+    required: false
+    default: "."
+  fail-on:
+    description: "Fail the run at this severity or above (high|medium|low|info), or 'none' to never fail."
+    required: false
+    default: "high"
+  min-severity:
+    description: "Hide findings below this severity (high|medium|low|info)."
+    required: false
+    default: "info"
+  disable:
+    description: "Comma-separated rule ids to turn off (e.g. SEAL-BIND,CA-BOUNDARY)."
+    required: false
+    default: ""
+  chain:
+    description: "Force the framework (sui|aptos) instead of classifying per module. Leave empty to auto-detect."
+    required: false
+    default: ""
+  version:
+    description: "npm version or dist-tag of @choosek/kinetics to run."
+    required: false
+    default: "latest"
+  sarif-file:
+    description: "Path to write the SARIF report to."
+    required: false
+    default: "kinetics.sarif"
+  upload-sarif:
+    description: "Upload the SARIF report to GitHub code scanning."
+    required: false
+    default: "true"
+
+outputs:
+  sarif-file:
+    description: "Path to the SARIF report produced by the run."
+    value: ${{ inputs.sarif-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    # Always writes the SARIF report and always exits 0 (--fail-on none), so the
+    # report is produced even when the threshold is exceeded and the upload step
+    # below still runs.
+    - name: Analyze (report)
+      shell: bash
+      run: >-
+        npx -y @choosek/kinetics@${{ inputs.version }} confidential "${{ inputs.path }}"
+        --sarif "${{ inputs.sarif-file }}"
+        --min-severity "${{ inputs['min-severity'] }}"
+        ${{ inputs.disable && format('--disable "{0}"', inputs.disable) || '' }}
+        ${{ inputs.chain && format('--chain "{0}"', inputs.chain) || '' }}
+        --fail-on none
+
+    # Uploads regardless of the enforce step's outcome, so a blocked merge still
+    # leaves a full report in the Security tab.
+    - name: Upload SARIF to code scanning
+      if: ${{ always() && inputs.upload-sarif == 'true' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+
+    # Enforces the threshold as a separate step: this is the one that fails the
+    # job when a finding at or above `fail-on` is present.
+    - name: Enforce threshold
+      shell: bash
+      run: >-
+        npx -y @choosek/kinetics@${{ inputs.version }} confidential "${{ inputs.path }}"
+        --min-severity "${{ inputs['min-severity'] }}"
+        ${{ inputs.disable && format('--disable "{0}"', inputs.disable) || '' }}
+        ${{ inputs.chain && format('--chain "{0}"', inputs.chain) || '' }}
+        --fail-on "${{ inputs['fail-on'] }}"
+        --quiet

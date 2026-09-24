@@ -10,7 +10,7 @@ Library for static analysis and simulation of transactions across the [Move](htt
 
 This library statically analyzes a transaction and derives its analyses entirely without network access or transaction signing. What it computes is determined by the chain's execution model, of which two are represented across the three supported chains: the object model of Sui, in which a transaction is a dataflow program, and the account and global-storage model of Aptos and Movement, in which a transaction carries a single payload. Each analysis is a pure, deterministic, dependency-free function of a transaction supplied as a plain object; none reads the network or signs anything.
 
-The library additionally offers *simulation*: rather than reading a transaction, it constructs one and executes it against a chain's current state to obtain the effects it would have if submitted — the balances that would move, the state that would change, and the gas it would cost — without signing or broadcasting it. Simulation necessarily reaches the network, but the library issues no requests of its own; each is delegated to a transport the caller supplies, so it remains dependency-free and runs unchanged in a browser, on a server, or behind a public API. Because the simulated effects are returned in the same form an executed transaction produces, they are interpreted through the same analyzers, and what a transaction *would* do is reported in the same terms as what a transaction *did*. Simulation is described in the [Simulation](#simulation) section.
+The library additionally offers *simulation*: rather than reading a transaction, it constructs one and executes it against a chain's current state to obtain the effects it would have if submitted (*e.g.*, the balances that would move, the state that would change, and the gas it would cost) without signing or broadcasting it. Simulation necessarily reaches the network, but the library issues no requests of its own; each is delegated to a transport the caller supplies, so it remains dependency-free and runs unchanged in a browser, on a server, or behind a public API. Because the simulated effects are returned in the same form an executed transaction produces, they are interpreted through the same analyzers, and what a transaction *would* do is reported in the same terms as what a transaction *did*. Simulation is described in the [Simulation](#simulation) section. Beyond analyzing and simulating a transaction, the library also statically analyzes a contract's *confidentiality* surface (Sui Seal access policies and Aptos Confidential Assets) described in the [Confidentiality Analysis](#confidentiality-analysis) section.
 
 ### Sui
 
@@ -18,11 +18,11 @@ A [Programmable Transaction Block](https://docs.sui.io/concepts/transactions/pro
 
 ### Aptos
 
-Aptos uses the original Move account and global-storage model. A transaction carries a single payload — most commonly an entry-function call, sometimes a Move script or a multisig wrapper — and does not chain the results of one command into the next, so there is no dataflow graph to reconstruct. The entry point `analyzeMoveTransaction` instead reads a transaction in the [Aptos REST](https://aptos.dev/en/build/apis/fullnode-rest-api) representation and reports what that model makes observable: the decoded payload (the function invoked, its type arguments, and the shape of its arguments), the gas profile, the emitted events, the balance movements those events imply — with each coin type recovered by correlating a withdrawal or deposit event against the `CoinStore` resource it was emitted against — and the write-set: the resources written or deleted, the modules published, and the distinct accounts and packages the transaction touches. The `octasToApt` and `subunitsToCoin` helpers render native-coin amounts. Like the PTB analyses, it is pure, deterministic, and dependency-free.
+Aptos uses the original Move account and global-storage model. A transaction carries a single payload (most commonly an entry-function call, sometimes a Move script or a multisig wrapper) and does not chain the results of one command into the next, so there is no dataflow graph to reconstruct. The entry point `analyzeMoveTransaction` instead reads a transaction in the [Aptos REST](https://aptos.dev/en/build/apis/fullnode-rest-api) representation and reports what that model makes observable: the decoded payload (the function invoked, its type arguments, and the shape of its arguments), the gas profile, the emitted events, the balance movements those events imply (with each coin type recovered by correlating a withdrawal or deposit event against the `CoinStore` resource it was emitted against) and the write-set: the resources written or deleted, the modules published, and the distinct accounts and packages the transaction touches. The `octasToApt` and `subunitsToCoin` helpers render native-coin amounts. Like the PTB analyses, it is pure, deterministic, and dependency-free.
 
 ### Movement
 
-Movement runs the same Move virtual machine as Aptos and exposes an Aptos-compatible REST interface — its mainnet carries the chain identifier 30732, and its test network is Bardock — so `analyzeMoveTransaction` analyzes a Movement transaction without modification, reporting the same payload, events, balance movements, write-set, and gas as in the Aptos case. The only distinctions the caller draws are the native coin the analysis is asked to name — MOVE, in the same eight-decimal subunits as Aptos — and the endpoint from which the transaction is read. The same guarantees of purity and determinism hold.
+Movement runs the same Move virtual machine as Aptos and exposes an Aptos-compatible REST interface (its mainnet carries the chain identifier 30732, and its test network is Bardock) so `analyzeMoveTransaction` analyzes a Movement transaction without modification, reporting the same payload, events, balance movements, write-set, and gas as in the Aptos case. The only distinctions the caller draws are the native coin the analysis is asked to name (MOVE, in the same eight-decimal subunits as Aptos) and the endpoint from which the transaction is read. The same guarantees of purity and determinism hold.
 
 ## Package Installation and Usage
 
@@ -35,7 +35,7 @@ The library can be imported in the usual way:
 ```ts
 import * as kinetics from "@choosek/kinetics";
 ```
-The library has no runtime dependencies. For analysis it exposes one entry point per execution model — `analyzePtb` for Sui and `analyzeMoveTransaction` for Aptos and Movement — each of which takes a transaction expressed as a plain object and returns a plain analysis object; the input accepted for each chain, and the analyses each computes, are described in the per-chain subsections below. For simulation it exposes `simulate`, which builds a transaction and executes it against live chain state through a transport the caller injects; it is described in the [Simulation](#simulation) section.
+The library has no runtime dependencies. For analysis it exposes one entry point per execution model: `analyzePtb` for Sui and `analyzeMoveTransaction` for Aptos and Movement. Each of these takes a transaction expressed as a plain object and returns a plain analysis object; the input accepted for each chain, and the analyses each computes, are described in the per-chain subsections below. For simulation it exposes `simulate`, which builds a transaction and executes it against live chain state through a transport the caller injects; it is described in the [Simulation](#simulation) section.
 
 ### Sui
 
@@ -83,11 +83,11 @@ Each command is assigned a dependency depth equal to one more than the maximum d
 
 ##### Forward Taint
 
-Each transaction-level input (and the gas coin) is a distinct taint source. The taint set of a command is the union of the taint sets of its arguments' producers, computed in a single forward pass. The *sinks* are the commands through which value leaves the sender's control or mutates externally observable state — object transfers, coin merges, and Move calls — and each is reported together with the inputs whose taint reaches it. Taint may reach a sink transitively: an input that is not itself an argument to a sink can still influence it by flowing through an intermediate command.
+Each transaction-level input (and the gas coin) is a distinct taint source. The taint set of a command is the union of the taint sets of its arguments' producers, computed in a single forward pass. The *sinks* are the commands through which value leaves the sender's control or mutates externally observable state (*i.e.*, object transfers, coin merges, and Move calls) and each is reported together with the inputs whose taint reaches it. Taint may reach a sink transitively: an input that is not itself an argument to a sink can still influence it by flowing through an intermediate command.
 
 ##### Linear-Resource Accounting
 
-Move models objects as [linear resources](https://en.wikipedia.org/wiki/Substructural_type_system#Linear_type_systems): a value whose type carries the `key` or `store` ability must be explicitly consumed rather than implicitly discarded. The Sui runtime enforces a corresponding property on PTBs — [if a command creates an object that is not subsequently destroyed, transferred, or used, the transaction fails](https://docs.sui.io/concepts/transactions/prog-txn-blocks). This library approximates that property statically: every command result that represents a resource should be referenced by a later command, and any result that is never referenced is reported as *dangling*. Because a dangling result frequently indicates a mistake, this check is often useful before a block is ever submitted. When effects are supplied, the object-change set is additionally summarized into conservation totals, including the net change in the number of objects (objects created and unwrapped, less those deleted and wrapped).
+Move models objects as [linear resources](https://en.wikipedia.org/wiki/Substructural_type_system#Linear_type_systems): a value whose type carries the `key` or `store` ability must be explicitly consumed rather than implicitly discarded. The Sui runtime enforces a corresponding property on PTBs: [if a command creates an object that is not subsequently destroyed, transferred, or used, the transaction fails](https://docs.sui.io/concepts/transactions/prog-txn-blocks). This library approximates that property statically: every command result that represents a resource should be referenced by a later command, and any result that is never referenced is reported as *dangling*. Because a dangling result frequently indicates a mistake, this check is often useful before a block is ever submitted. When effects are supplied, the object-change set is additionally summarized into conservation totals, including the net change in the number of objects (objects created and unwrapped, less those deleted and wrapped).
 
 ##### Gas Attribution
 
@@ -95,13 +95,13 @@ The net gas cost is the computation cost plus the storage cost less the storage 
 
 ### Aptos
 
-`analyzeMoveTransaction(tx, options?)` analyzes an Aptos transaction supplied in the [Aptos REST](https://aptos.dev/en/build/apis/fullnode-rest-api) representation — as returned by `GET /transactions/by_hash/{hash}` or `GET /transactions/by_version/{version}`, or as an element of the array returned by `POST /transactions/simulate`. The optional second argument carries presentational parameters, `{chain, network, symbol, decimals}`, of which `symbol` and `decimals` describe the native coin and default to `"APT"` and `8`.
+`analyzeMoveTransaction(tx, options?)` analyzes an Aptos transaction supplied in the [Aptos REST](https://aptos.dev/en/build/apis/fullnode-rest-api) representation as returned by `GET /transactions/by_hash/{hash}` or `GET /transactions/by_version/{version}`, or as an element of the array returned by `POST /transactions/simulate`. The optional second argument carries presentational parameters, `{chain, network, symbol, decimals}`, of which `symbol` and `decimals` describe the native coin and default to `"APT"` and `8`.
 
-The result is a `MoveAnalysis`, comprising a `summary` of headline figures (`MoveSummary`); the decoded `payload` (a `MovePayloadDetail`, categorized by `MovePayloadKind` as an entry-function call, script, multisig wrapper, module bundle, or unknown); the `gas` attribution (`MoveGas`); the aggregated `events`; the `balanceChanges`, each a `MoveBalanceChange` carrying a `BalanceDirection` and, where recoverable, a resolved coin type; the `writeset` accounting (`MoveWriteset`); and the distinct `packages` and `accounts` the transaction touches, together with its `sender`, `hash`, and timestamp. As with the PTB analyses, the individual normalizers — `summarizeEvents`, `normalizeMovePayload`, `normalizeWriteset`, and `deriveBalanceChanges` — are each exported so that a single facet of an already-fetched transaction may be computed on its own.
+The result is a `MoveAnalysis`, comprising a `summary` of headline figures (`MoveSummary`); the decoded `payload` (a `MovePayloadDetail`, categorized by `MovePayloadKind` as an entry-function call, script, multisig wrapper, module bundle, or unknown); the `gas` attribution (`MoveGas`); the aggregated `events`; the `balanceChanges`, each a `MoveBalanceChange` carrying a `BalanceDirection` and, where recoverable, a resolved coin type; the `writeset` accounting (`MoveWriteset`); and the distinct `packages` and `accounts` the transaction touches, together with its `sender`, `hash`, and timestamp. As with the PTB analyses, the individual normalizers `summarizeEvents`, `normalizeMovePayload`, `normalizeWriteset`, and `deriveBalanceChanges` are each exported so that a single facet of an already-fetched transaction may be computed on its own.
 
 ### Movement
 
-Movement transactions are analyzed by the same `analyzeMoveTransaction`, Movement's REST interface being Aptos-compatible. The accepted input and the returned `MoveAnalysis` are exactly those of the [Aptos](#aptos) case; the caller passes `{symbol: "MOVE"}` in the options — the eight-decimal default being shared — and reads the transaction from a Movement endpoint, whether its mainnet or the Bardock test network.
+Movement transactions are analyzed by the same `analyzeMoveTransaction`, Movement's REST interface being Aptos-compatible. The accepted input and the returned `MoveAnalysis` are exactly those of the [Aptos](#aptos) case; the caller passes `{symbol: "MOVE"}` in the options (the eight-decimal default being shared) and reads the transaction from a Movement endpoint, whether its mainnet or the Bardock test network.
 
 ### Examples
 
@@ -171,19 +171,19 @@ console.log(analysis.resources.conservation?.netObjectDelta); // 1
 
 ## Simulation
 
-Analysis reads a transaction that already exists; *simulation* constructs one and asks a chain what it would do. Given a description of an intended transaction, `simulate` builds it, executes it against the chain's current state through the network's own dry-run facility, and returns the effects it would have if submitted — whether it would succeed, the balances that would move, the state entries that would change, and the gas it would cost — without signing or broadcasting anything. Those effects are returned in one uniform shape across chains. On Aptos and Movement the returned transaction is additionally interpreted through `analyzeMoveTransaction`, so a counterfactual is reported in the same terms as a historical transaction; on Sui the dry-run's status, balance changes, and gas are read directly.
+Analysis reads a transaction that already exists; *simulation* constructs one and asks a chain what it would do. Given a description of an intended transaction, `simulate` builds it, executes it against the chain's current state through the network's own dry-run facility, and returns the effects it would have if submitted (*i.e.*, whether it would succeed, the balances that would move, the state entries that would change, and the gas it would cost) without signing or broadcasting anything. Those effects are returned in one uniform shape across chains. On Aptos and Movement the returned transaction is additionally interpreted through `analyzeMoveTransaction`, so a counterfactual is reported in the same terms as a historical transaction; on Sui the dry-run's status, balance changes, and gas are read directly.
 
 ### Injected Transport
 
-Simulation is the one capability that must reach the network, yet the library performs no I/O itself. Each request it needs to make is expressed as a plain object and passed to a `Transport` — a function `(request) => Promise<response>` the caller supplies — which performs the request and returns the parsed JSON. The library thus depends on no HTTP client, SDK, or endpoint, and the same simulation core runs wherever a transport can be provided: in a browser against a same-origin proxy, on a server against an RPC provider, or behind a public API. A request is a Sui GraphQL call of the form `{chain, graphql: {query, variables}}` or an Aptos-style REST call of the form `{chain, rest: {method, path, query, body}}`; the transport is responsible for reaching the endpoint for the network the intent names and returning its parsed response.
+Simulation is the one capability that must reach the network, yet the library performs no I/O itself. Each request it needs to make is expressed as a plain object and passed to a `Transport` (specifically, a function `(request) => Promise<response>` the caller supplies) which performs the request and returns the parsed JSON. The library thus depends on no HTTP client, SDK, or endpoint, and the same simulation core runs wherever a transport can be provided: in a browser against a same-origin proxy, on a server against an RPC provider, or behind a public API. A request is a Sui GraphQL call of the form `{chain, graphql: {query, variables}}` or an Aptos-style REST call of the form `{chain, rest: {method, path, query, body}}`; the transport is responsible for reaching the endpoint for the network the intent names and returning its parsed response.
 
 ### The `simulate` Entry Point
 
-`simulate(intent, transport)` takes a `SimulationIntent` and a `Transport` and resolves to a uniform `SimulationResult`. The intent is a discriminated union whose implemented case is a native-coin `transfer`, stated as a wallet would state it: `{kind: "transfer", chain, network, sender, recipient, amount, symbol, decimals}`, where `amount` is a decimal string in whole coins and `symbol`/`decimals` name the native coin. The result reports the predicted `success` and VM `status`, the `gas` cost (both in the coin's smallest unit and rendered), the `balanceChanges` (each a magnitude, a `direction`, an asset, and the account it applies to), the number of state entries the transaction would touch, and — for Aptos and Movement, for richer display — the full `analyzeMoveTransaction` analysis of the simulated transaction. A `SimulationError` is thrown when the transaction cannot be built or the chain reports that it cannot be simulated. The individual request builders and response normalizers — among them `buildSuiTransferKind`, `suiDryRunRequest`, `parseSuiDryRun`, `buildSenderSignature`, `aptosSimulateRequest`, and `parseAptosSimulation` — are each exported, so a caller may drive any single step directly.
+`simulate(intent, transport)` takes a `SimulationIntent` and a `Transport` and resolves to a uniform `SimulationResult`. The intent is a discriminated union whose implemented case is a native-coin `transfer`, stated as a wallet would state it: `{kind: "transfer", chain, network, sender, recipient, amount, symbol, decimals}`, where `amount` is a decimal string in whole coins and `symbol`/`decimals` name the native coin. The result reports the predicted `success` and VM `status`, the `gas` cost (both in the coin's smallest unit and rendered), the `balanceChanges` (each a magnitude, a `direction`, an asset, and the account it applies to), the number of state entries the transaction would touch, and (for Aptos and Movement, for richer display) the full `analyzeMoveTransaction` analysis of the simulated transaction. A `SimulationError` is thrown when the transaction cannot be built or the chain reports that it cannot be simulated. The individual request builders and response normalizers (including `buildSuiTransferKind`, `suiDryRunRequest`, `parseSuiDryRun`, `buildSenderSignature`, `aptosSimulateRequest`, and `parseAptosSimulation`) are each exported, so a caller may drive any single step directly.
 
 ### Per-Chain Mechanics
 
-On Sui, the transfer's programmable block — `SplitCoins(GasCoin, [amount])` followed by `TransferObjects([coin], recipient)` — is serialized to BCS transaction-kind bytes by the library itself and dry-run through the GraphQL `dryRunTransactionBlock` query, with `txMeta` supplying the sender and letting the node select gas. This uses only the client and a GraphQL endpoint; it does not rely on the fullnode's `unsafe_*` transaction-builder methods, which Sui has deprecated on public fullnodes along with the rest of JSON-RPC. On Aptos and Movement, which share a REST surface, simulation needs no valid signature: the sender's sequence number is read from `GET /accounts/{address}`, and rather than assume a key scheme, the library mirrors the authenticator from the account's own most recent transaction — so the sender must have transacted at least once before — blanking its signature bytes to a placeholder. Mirroring the real authenticator lets legacy Ed25519 accounts and modern single-key (or keyless) accounts simulate without special-casing. That placeholder `SignedTransaction` is submitted to `POST /transactions/simulate` with gas estimation enabled, and the returned `UserTransaction` feeds `analyzeMoveTransaction`.
+On Sui, the transfer's programmable block — `SplitCoins(GasCoin, [amount])` followed by `TransferObjects([coin], recipient)` — is serialized to BCS transaction-kind bytes by the library itself and dry-run through the GraphQL `dryRunTransactionBlock` query, with `txMeta` supplying the sender and letting the node select gas. This uses only the client and a GraphQL endpoint; it does not rely on the fullnode's `unsafe_*` transaction-builder methods, which Sui has deprecated on public fullnodes along with the rest of JSON-RPC. On Aptos and Movement, which share a REST surface, simulation needs no valid signature: the sender's sequence number is read from `GET /accounts/{address}`, and rather than assume a key scheme, the library mirrors the authenticator from the account's own most recent transaction (so the sender must have transacted at least once before) blanking its signature bytes to a placeholder. Mirroring the real authenticator lets legacy Ed25519 accounts and modern single-key (or keyless) accounts simulate without special-casing. That placeholder `SignedTransaction` is submitted to `POST /transactions/simulate` with gas estimation enabled, and the returned `UserTransaction` feeds `analyzeMoveTransaction`.
 
 ### Example
 
@@ -221,6 +221,58 @@ console.log(result.success);         // whether it would succeed if submitted
 console.log(result.gas.formatted);   // e.g. "0.00150000"
 console.log(result.balanceChanges);  // the movements it would cause
 ```
+
+## Confidentiality Analysis
+
+Alongside the transaction analyzers, the library statically analyzes the *confidentiality* surface of a Move contract: the paths by which data a contract is meant to keep secret could instead be disclosed on-chain. Two frameworks are covered. On Sui, a [Seal](https://github.com/MystenLabs/seal) `seal_approve*` function is an access policy the key servers dry-run — it grants the decryption key when it completes and denies when it aborts — so the analyzer places each policy as Open, Restricted, or Locked and checks the Seal conventions (it must be `entry`, take `id: vector<u8>` first, and be side-effect free). On Aptos, [Confidential Assets](https://aptos.dev/en/build/smart-contracts/confidential-asset) keep balances and transfer amounts encrypted (Twisted ElGamal with zero-knowledge proofs) while addresses and the fact of a transfer stay public (confidentiality, not anonymity) so the analyzer separates *moving* an encrypted amount from *disclosing* it and traces the paths that put an amount back in the open: an event, a leaked decryption key, or the public amounts at a deposit or withdraw boundary.
+
+The analysis runs in two engines behind one entry point. The default is a Move **AST front-end**: a hand-written recursive-descent parser builds a syntax tree, and the analysis follows dataflow through calls and reasons about types. That is what lets a policy whose check lives in a private helper read as Restricted rather than Open, a plaintext `u64` amount emitted in an event be distinguished from an already-encrypted `vector<u8>` ciphertext, and a hashed amount be recognized as a commitment rather than a leak. The parser targets the practical Move subset these analyses need; for any source it cannot parse, the analyzer falls back to a **lexical engine** that scans the source with regular expressions, so no input is rejected outright. Both engines follow the identical result shape and set `engine` to `"ast"` or `"lexical"`. Note that these findings are advisory static heuristics and not a proof.
+
+#### Library
+
+`analyzeConfidentiality` is the entry point most callers want; it runs the AST front-end and falls back to the lexical engine automatically:
+```ts
+import { analyzeConfidentiality } from "@choosek/kinetics";
+
+const result = analyzeConfidentiality(moveSource);
+if (result.ok) {
+  console.log(result.framework, result.engine); // e.g. "seal" "ast"
+  for (const finding of result.findings) {
+    console.log(`${finding.sev} ${finding.id} @ line ${finding.loc}: ${finding.title}`);
+  }
+}
+```
+A successful result reports the `framework`, the `engine` that ran, the `module` name, per-severity `summary` counts, the `findings` (each with a stable rule `id`, a `sev` of `high | medium | low | info`, a source line `loc`, a `title`, a `detail`, and a `fix`), the exposure `surface`, an `observers` view of what is public, authorized, and leaked, and the `assumptions` the analysis made. Pass `{ chain: "sui" }` or `{ chain: "aptos" }` to force the framework instead of classifying the source automatically. The individual engines are exported as `analyzeConfidentialityAst` and `analyzeConfidentialityLexical`, the parser as `parseMove`, and the full rule catalog as `CONFIDENTIALITY_RULES`.
+
+#### Command Line
+
+The package installs a `kinetics` binary whose `confidential` subcommand runs the same analysis over a tree of Move sources:
+```shell
+npx @choosek/kinetics confidential ./sources
+```
+It reads every `.move` file under the given paths, analyzes each module, reports findings at their true file and line, and exits non-zero when a finding at or above the failure threshold is present. Thus, a pull request that would expose confidential state does not merge. `--fail-on <severity>` sets that threshold (default `high`; `none` never fails), `--min-severity <severity>` hides advisory noise, and `--disable SEAL-BIND,CA-BOUNDARY` turns off individual rules. `--sarif [file]` and `--json [file]` emit machine-readable output (to a file, or to stdout when no path is given), and `--chain sui|aptos` forces the framework when a file mixes conventions. The exit code is `0` when nothing reaches the threshold, `1` when a finding does, and `2` for a usage error.
+
+#### GitHub Action
+
+The repository doubles as a composite GitHub Action, so the same rules run on every pull request. It emits [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), which GitHub code scanning renders natively: each finding appears inline on the pull request and in the repository's Security tab, annotated on the exact line and linked to the rule that raised it. The Action runs the analysis, uploads the SARIF report so results always reach code scanning, then enforces the threshold as a separate step. This way, a blocked merge still leaves a full report behind to read.
+```yaml
+# .github/workflows/confidentiality.yml
+name: Confidentiality
+on: [pull_request]
+permissions:
+  contents: read
+  security-events: write   # upload SARIF to code scanning
+jobs:
+  kinetics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: choosek/kinetics-ts@v0
+        with:
+          path: sources
+          fail-on: high
+```
+The Action accepts `path`, `fail-on`, `min-severity`, `disable`, and `chain` (mirroring the CLI flags), plus `version` (the published `@choosek/kinetics` version to run), `sarif-file`, and `upload-sarif`.
 
 ## Development
 
