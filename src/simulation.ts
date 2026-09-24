@@ -173,7 +173,9 @@ function u64ToHexLE(value: bigint): string {
   let hex = "";
   let v = value;
   for (let i = 0; i < 8; i++) {
-    hex += (Number(v & 0xffn)).toString(16).padStart(2, "0");
+    hex += Number(v & 0xffn)
+      .toString(16)
+      .padStart(2, "0");
     v >>= 8n;
   }
   return hex;

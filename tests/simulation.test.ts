@@ -281,7 +281,9 @@ describe("parseSuiSimulation", () => {
   });
 
   test("throws on a non-object response", () => {
-    expect(() => parseSuiSimulation(suiIntent, "nope")).toThrow(SimulationError);
+    expect(() => parseSuiSimulation(suiIntent, "nope")).toThrow(
+      SimulationError,
+    );
   });
 });
 
